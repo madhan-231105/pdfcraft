@@ -2017,10 +2017,11 @@ fn change_kind(doc: &Document, old: &Document, d: &Dict, before: Option<&Dict>) 
         b.name(b"Subtype") == Some(b"Widget") && b.name(b"FT") == Some(b"Sig") && b.get(b"V").is_some_and(|v| old.resolve(v).as_dict().is_some())
     }) && before != Some(d)
     {
-        if let Some(b) = before {
-            if without(d, &[b"AP"]) == without(b, &[b"AP"]) && crate::status_layers::is_status_layer_update(doc, old, d, b) {
-                return kind::SIGNATURE;
-            }
+        if let Some(b) = before
+            && without(d, &[b"AP"]) == without(b, &[b"AP"])
+            && crate::status_layers::is_status_layer_update(doc, old, d, b)
+        {
+            return kind::SIGNATURE;
         }
         return kind::PAGE_CONTENT;
     }
