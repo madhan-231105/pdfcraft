@@ -33,7 +33,7 @@ pub use pdf::{
     in_english, kind, list as signatures, sign, sign_with_timestamp, timestamp_document, validate,
 };
 pub use pkcs12::DigitalId;
-pub use status_layers::{StatusCaptions, has_status_layers, show_status_layers, status_rgb};
+pub use status_layers::{StatusCaptions, has_status_layers, show_status_layers, status_layers_up_to_date, status_rgb};
 pub use timestamp::{TimestampAuthority, TimestampQuery, TimestampToken};
 pub use x509::{Certificate, Name};
 

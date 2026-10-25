@@ -4350,6 +4350,7 @@ dependencies = [
  "pdfcraft-fonts",
  "pdfcraft-model",
  "pdfcraft-testkit",
+ "png 0.18.1",
  "rc2",
  "ripemd",
  "rsa",

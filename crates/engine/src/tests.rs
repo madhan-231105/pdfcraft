@@ -4489,8 +4489,8 @@ fn named_layer_signable_fixture() -> Vec<u8> {
     out
 }
 
-/// The status colours as the regenerated icons draw them.
-const VALID_GREEN: [u8; 3] = [0x2D, 0x9D, 0x78];
+/// The status colours as the regenerated icons and watermark draw them.
+const VALID_GREEN: [u8; 3] = [1, 179, 59];
 const UNKNOWN_AMBER: [u8; 3] = [0xE6, 0x86, 0x19];
 const INVALID_RED: [u8; 3] = [0xD7, 0x37, 0x3F];
 
@@ -4542,9 +4542,10 @@ fn check_named_layer_states(signed: Arc<Vec<u8>>, password: Option<&str>, anchor
     assert!(exported.contains("Signature valid"), "{exported}");
     let page = displayed_pixels(&s, id);
     assert!(pixels_near(&page, VALID_GREEN) > 500 && pixels_near(&page, UNKNOWN_AMBER) < 50, "the page redraws for the new state");
-    // Saving writes the working file, which never held the drawn state.
+    // Saving writes the drawn state so the saved file retains the verified signature.
     let saved = s.save_bytes(id).unwrap();
-    assert!(saved == signed, "an unchanged save is the signed file exactly");
+    assert!(saved.starts_with(&signed), "an unchanged save keeps the signed revision and appends the verified state");
+    assert!(saved.windows(10).any(|w| w == b"/watermark"), "saved bytes contain watermark layer");
     let mut t = Session::new().with_clock(|| 1_800_000_000);
     t.set_trusted_certificates(vec![anchor.clone()]);
     let tid = t.open("named-saved.pdf", None, saved, password).unwrap();

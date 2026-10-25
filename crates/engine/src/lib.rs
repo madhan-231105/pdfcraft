@@ -953,12 +953,7 @@ fn is_placeholder_title(title: &str) -> bool {
 /// The in-memory display copy, including missing comment and form-field
 /// appearances and signature status layers. These changes are not saved
 /// to the working PDF.
-fn display_bytes(
-    editor: Option<&mut Editor>,
-    bytes: &Arc<Vec<u8>>,
-    signatures: &mut [SignatureInfo],
-    captions: &StatusCaptions,
-) -> Arc<Vec<u8>> {
+fn display_bytes(editor: Option<&mut Editor>, bytes: &Arc<Vec<u8>>, signatures: &mut [SignatureInfo], captions: &StatusCaptions) -> Arc<Vec<u8>> {
     for sig in signatures.iter_mut() {
         sig.verdict_shown = false;
     }
@@ -967,13 +962,9 @@ fn display_bytes(
         return bytes.clone();
     };
 
-    let comments =
-        pdfcraft_annot::with_missing_appearances_cached(&e.cos, &mut e.appearances);
+    let comments = pdfcraft_annot::with_missing_appearances_cached(&e.cos, &mut e.appearances);
 
-    let fields = pdfcraft_forms::with_field_appearances_cached(
-        comments.as_ref().unwrap_or(&e.cos),
-        &mut e.field_appearances,
-    );
+    let fields = pdfcraft_forms::with_field_appearances_cached(comments.as_ref().unwrap_or(&e.cos), &mut e.field_appearances);
 
     let Some(mut display) = fields.or(comments) else {
         if !pdfcraft_sign::has_status_layers(&e.cos, signatures) {
@@ -4613,8 +4604,13 @@ impl Session {
         let doc = self.get(id).ok_or(EditError::NoDocument)?;
         let Some(editor) = doc.editor.as_ref() else { return Ok(doc.bytes.clone()) };
         let on_saved = Arc::ptr_eq(editor.cos.bytes(), &editor.saved);
-        if !editor.cos.is_modified() && on_saved && (!editor.cos.reconstructed() || doc.is_signed()) {
+        let has_verified = doc.signatures.iter().any(|s| s.verdict_shown && s.status == SignatureStatus::Valid);
+        let needs_status_save = has_verified && !pdfcraft_sign::status_layers_up_to_date(&editor.cos, &doc.signatures);
+        if !editor.cos.is_modified() && on_saved && !needs_status_save && (!editor.cos.reconstructed() || doc.is_signed()) {
             return Ok(editor.saved.clone());
+        }
+        if !editor.cos.is_modified() && on_saved && needs_status_save {
+            return Ok(doc.display.clone());
         }
         // What the user removed again before saving (a cleared redaction mark) stays out of the file.
         let opts = SaveOptions { mod_date: self.now().map(pdfcraft_cos::pdf_date), drop_unlinked: true, ..SaveOptions::default() };
@@ -4624,13 +4620,18 @@ impl Session {
         let rewrite = editor.cos.full_save_required() || editor.cos.encryption_changed() || editor.cos.revisions().is_empty();
         let cos = writable(&editor.cos)?;
         guard(|| {
-            if on_saved || rewrite {
-                write_incremental(&cos, &opts)
+            let mut cos = if on_saved || rewrite {
+                cos.into_owned()
             } else {
                 let mut base = pdfcraft_cos::Document::open_with_password(editor.saved.clone(), editor.saved_keys.reopen.as_deref())?;
                 base.overlay_changes_from(&cos)?;
-                write_incremental(&base, &opts)
+                base
+            };
+            if has_verified && !pdfcraft_sign::status_layers_up_to_date(&cos, &doc.signatures) {
+                let mut sigs = doc.signatures.to_vec();
+                let _ = pdfcraft_sign::show_status_layers(&mut cos, &mut sigs, &doc.captions);
             }
+            write_incremental(&cos, &opts)
         })
         .map_err(EditError::Write)?
         .map(Arc::new)

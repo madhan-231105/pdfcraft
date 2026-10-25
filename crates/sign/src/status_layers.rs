@@ -1,4 +1,6 @@
 //! Status layers of named-layer signature appearances, drawn for the signature's real state.
+//! Status layers of named-layer signature appearances, drawn for the signature's real state.
+//! Status layers of named-layer signature appearances, drawn for the signature's real state.
 //!
 //! A named-layer appearance's `/N` draws a layer form, which draws `n0` (background), `n1`
 //! (unknown or valid), `n2` (signer details), `n3` (invalid) and `n4` (status text). The file
@@ -153,9 +155,11 @@ pub const fn status_rgb(status: Status) -> [u8; 3] {
 // and joins, no fill, as in the SVGs.
 
 /// `circle-check.svg`: `<circle cx="12" cy="12" r="10"/>`, `<path d="m16 9-5.5 5.5L8 12"/>`.
+// const CIRCLE_CHECK: &str =
+//     "22 12 m 22 17.523 17.523 22 12 22 c 6.477 22 2 17.523 2 12 c 2 6.477 6.477 2 12 2 c 17.523 2 22 6.477 22 12 c h S 16 9 m 10.5 14.5 l 8 12 l S";
+#[allow(unused)]
 const CIRCLE_CHECK: &str =
     "22 12 m 22 17.523 17.523 22 12 22 c 6.477 22 2 17.523 2 12 c 2 6.477 6.477 2 12 2 c 17.523 2 22 6.477 22 12 c h S 16 9 m 10.5 14.5 l 8 12 l S";
-
 /// `triangle-alert.svg`: `<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/>`,
 /// `<path d="M12 9v4"/>`, `<path d="M12 17h.01"/>`.
 const TRIANGLE_ALERT: &str = "21.73 18 m 13.73 4 l 13.375 3.373 12.71 2.986 11.99 2.986 c 11.27 2.986 10.605 3.373 10.25 4 c 2.25 18 l 1.891 18.622 1.893 19.388 2.254 20.008 c 2.616 20.628 3.282 21.006 4 21 c 20 21 l 20.714 20.999 21.374 20.618 21.731 19.999 c 22.087 19.38 22.087 18.618 21.73 18 c h S 12 9 m 12 13 l S 12 17 m 12.01 17 l S";
@@ -230,6 +234,32 @@ pub fn has_status_layers(doc: &Document, signatures: &[SignatureInfo]) -> bool {
     })
 }
 
+/// Whether `doc` already holds the status layers matching each signature's current status (e.g.
+/// watermark already present for valid signatures).
+pub fn status_layers_up_to_date(doc: &Document, signatures: &[SignatureInfo]) -> bool {
+    let fields = Fields::of(doc);
+    let mut drawing = HashMap::new();
+    let mut any_valid = false;
+    for sig in signatures.iter().filter(|s| drawable(s)) {
+        if sig.status != Status::Valid {
+            continue;
+        }
+        let Some(widgets) = fields.widgets(&sig.field) else { continue };
+        for (r, w) in widgets {
+            if r.is_none_or(|r| fields.shared(r)) || !shows(doc, w) {
+                continue;
+            }
+            let Some(n) = appearance(doc, w) else { continue };
+            let Some(layout) = recognise(doc, n, &mut drawing) else { continue };
+            any_valid = true;
+            if !layout.form_xobjects.contains(b"watermark") {
+                return false;
+            }
+        }
+    }
+    any_valid
+}
+
 /// A signed field. A document timestamp has no field of its own, and its name could be a real
 /// field's.
 fn drawable(sig: &SignatureInfo) -> bool {
@@ -278,6 +308,18 @@ fn draw(doc: &mut Document, widget_ref: ObjRef, widget: &Dict, status: Status, c
 fn appearance(doc: &Document, widget: &Dict) -> Option<ObjRef> {
     let ap = doc.resolve(widget.get(b"AP")?);
     ap.as_dict()?.get(b"N")?.as_ref()
+}
+
+/// Whether an updated widget dictionary `d` in `doc` is a legitimate status-layer appearance
+/// update of `before` in `old`. Both must be recognized named-layer appearances with matching
+/// `/BBox` dimensions.
+pub(crate) fn is_status_layer_update(doc: &Document, old: &Document, d: &Dict, before: &Dict) -> bool {
+    let Some(old_ap) = appearance(old, before) else { return false };
+    let Some(new_ap) = appearance(doc, d) else { return false };
+    let mut drawing = HashMap::new();
+    let Some(old_layout) = recognise(old, old_ap, &mut drawing) else { return false };
+    let Some(new_layout) = recognise(doc, new_ap, &mut drawing) else { return false };
+    old_layout.form_bbox == new_layout.form_bbox
 }
 
 /// A field's widgets: each one's reference (when it has one) and dictionary.
@@ -364,6 +406,7 @@ struct Layout {
     name: Vec<u8>,
     form_ref: ObjRef,
     form: Stream,
+    form_bbox: [f64; 4],
     form_xobjects: Dict,
     n1: Layer,
     n3: Layer,
@@ -406,6 +449,7 @@ fn recognise(doc: &Document, n_ref: ObjRef, drawing: &mut HashMap<u32, bool>) ->
         }
     }
     let (name, form_ref, form, form_xobjects) = found?;
+    let form_bbox = four_numbers(doc, form.dict.get(b"BBox"))?;
     // Layers the form holds but never draws would be redrawn out of sight.
     let draws = drawing.entry(form_ref.num).or_insert_with(|| drawn_names(&form).is_some_and(|d| d.contains(&b"n1"[..]) && d.contains(&b"n3"[..])));
     if !*draws {
@@ -417,7 +461,7 @@ fn recognise(doc: &Document, n_ref: ObjRef, drawing: &mut HashMap<u32, bool>) ->
         Some(o) => Some(layer(doc, Some(o))?),
         None => None,
     };
-    Some(Layout { n: n.clone(), n_xobjects, name, form_ref, form, form_xobjects, n1, n3, n4 })
+    Some(Layout { n: n.clone(), n_xobjects, name, form_ref, form, form_bbox, form_xobjects, n1, n3, n4 })
 }
 
 /// The names a content stream draws with `Do`, or `None` when it doesn't decode within
@@ -479,23 +523,39 @@ fn regenerate(doc: &mut Document, layout: Layout, status: Status, copies: &mut C
 /// The layer form's copy for `status`, with its status layers redrawn.
 fn regenerate_form(doc: &mut Document, layout: &Layout, status: Status, face: &mut Face) -> Option<ObjRef> {
     let icon = |path: &str, layer: &Layer| icon_ops(path, status_rgb(status), &layer.bbox);
-    let (n1, n3) = match status {
-        Status::Valid => (icon(CIRCLE_CHECK, &layout.n1)?, Vec::new()),
-        Status::Unknown => (icon(TRIANGLE_ALERT, &layout.n1)?, Vec::new()),
-        Status::Invalid => (Vec::new(), icon(CIRCLE_X, &layout.n3)?),
+
+    let n1 = match status {
+        Status::Valid => Vec::new(),
+        Status::Unknown => icon(TRIANGLE_ALERT, &layout.n1)?,
+        Status::Invalid => Vec::new(),
     };
+
+    let n3 = match status {
+        Status::Invalid => icon(CIRCLE_X, &layout.n3)?,
+        _ => Vec::new(),
+    };
+
     let mut layers = layout.form_xobjects.clone();
+
     let n1 = Stream::from_raw(layer_dict(doc, &layout.n1, Dict::new()), n1);
     let n3 = Stream::from_raw(layer_dict(doc, &layout.n3, Dict::new()), n3);
+
     layers.set(b"n1".to_vec(), doc.add(n1));
     layers.set(b"n3".to_vec(), doc.add(n3));
+
     if let Some(n4) = &layout.n4 {
         let (resources, ops) = caption(doc, face, status, &n4.bbox);
         let n4 = Stream::from_raw(layer_dict(doc, n4, resources), ops);
         layers.set(b"n4".to_vec(), doc.add(n4));
     }
-    // Copied as stored, filters and all; only the XObject resources change.
+
+    // Preserve the original form and update its XObject resources.
     let mut form = layout.form.clone();
+
+    if status == Status::Valid {
+        add_watermark(doc, layout, &mut layers, &mut form)?;
+    }
+
     set_xobjects(doc, &mut form.dict, layers);
     Some(doc.add(form))
 }
@@ -551,6 +611,177 @@ fn icon_ops(path: &str, rgb: [u8; 3], bbox: &[f64; 4]) -> Option<Vec<u8>> {
     out.extend_from_slice(path.as_bytes());
     out.extend_from_slice(b"\nQ\n");
     Some(out)
+}
+
+/// Embed the green tick PNG as an image XObject, cropped to non-transparent pixels and preserving transparency.
+/// Returns the image ObjRef and the cropped image dimensions (width, height).
+fn green_tick_xobject(doc: &mut Document) -> Option<(ObjRef, f64, f64)> {
+    let data = include_bytes!("../assets/greentick.png");
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(data));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+
+    let mut reader = decoder.read_info().ok()?;
+    let mut buffer = vec![0; reader.output_buffer_size()?];
+    let frame = reader.next_frame(&mut buffer).ok()?;
+    let samples = buffer.get(..frame.buffer_size())?;
+
+    let (channels, color_space): (usize, &'static str) = match frame.color_type {
+        png::ColorType::Grayscale => (1, "DeviceGray"),
+        png::ColorType::GrayscaleAlpha => (2, "DeviceGray"),
+        png::ColorType::Rgb => (3, "DeviceRGB"),
+        png::ColorType::Rgba => (4, "DeviceRGB"),
+        png::ColorType::Indexed => return None,
+    };
+
+    let has_alpha = channels == 2 || channels == 4;
+    let alpha_offset = channels.saturating_sub(1);
+    let mut min_x = frame.width;
+    let mut min_y = frame.height;
+    let mut max_x = 0;
+    let mut max_y = 0;
+
+    for y in 0..frame.height {
+        for x in 0..frame.width {
+            let idx = (y as usize * frame.width as usize + x as usize) * channels;
+            let a = if has_alpha { samples.get(idx + alpha_offset).copied().unwrap_or(0) } else { 255 };
+            if a > 0 {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x + 1);
+                max_y = max_y.max(y + 1);
+            }
+        }
+    }
+
+    if min_x >= max_x || min_y >= max_y {
+        min_x = 0;
+        min_y = 0;
+        max_x = frame.width;
+        max_y = frame.height;
+    }
+
+    let crop_w = max_x.saturating_sub(min_x);
+    let crop_h = max_y.saturating_sub(min_y);
+    if crop_w == 0 || crop_h == 0 {
+        return None;
+    }
+
+    let colour_channels = channels - usize::from(has_alpha);
+    let mut colour = Vec::with_capacity((crop_w as usize).saturating_mul(crop_h as usize).saturating_mul(colour_channels));
+    let mut alpha = Vec::with_capacity((crop_w as usize).saturating_mul(crop_h as usize));
+
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            let idx = (y as usize * frame.width as usize + x as usize) * channels;
+            let pixel = samples.get(idx..idx + channels)?;
+            colour.extend_from_slice(&pixel[..colour_channels]);
+            if has_alpha {
+                alpha.push(pixel[alpha_offset]);
+            }
+        }
+    }
+
+    let mask_alpha: Option<Vec<u8>> = (has_alpha && alpha.iter().any(|a| *a != 255)).then_some(alpha);
+
+    let mut image_dict = Dict::new();
+    image_dict.set(b"Type".to_vec(), Object::name("XObject"));
+    image_dict.set(b"Subtype".to_vec(), Object::name("Image"));
+    image_dict.set(b"Width".to_vec(), Object::Int(i64::from(crop_w)));
+    image_dict.set(b"Height".to_vec(), Object::Int(i64::from(crop_h)));
+    image_dict.set(b"ColorSpace".to_vec(), Object::name(color_space));
+    image_dict.set(b"BitsPerComponent".to_vec(), Object::Int(8));
+
+    if let Some(mask_alpha) = mask_alpha {
+        let mut mask_dict = Dict::new();
+        mask_dict.set(b"Type".to_vec(), Object::name("XObject"));
+        mask_dict.set(b"Subtype".to_vec(), Object::name("Image"));
+        mask_dict.set(b"Width".to_vec(), Object::Int(i64::from(crop_w)));
+        mask_dict.set(b"Height".to_vec(), Object::Int(i64::from(crop_h)));
+        mask_dict.set(b"ColorSpace".to_vec(), Object::name("DeviceGray"));
+        mask_dict.set(b"BitsPerComponent".to_vec(), Object::Int(8));
+
+        let mask = doc.add(Object::Stream(Stream::flate(mask_dict, &mask_alpha)));
+        image_dict.set(b"SMask".to_vec(), Object::Ref(mask));
+    }
+
+    let image = doc.add(Object::Stream(Stream::flate(image_dict, &colour)));
+    Some((image, f64::from(crop_w), f64::from(crop_h)))
+}
+
+/// Draw a large green tick watermark across the signature panel, scaled to fit maintaining aspect ratio and centred.
+fn green_tick_ops(bbox: &[f64; 4], img_w: f64, img_h: f64) -> Option<Vec<u8>> {
+    let (w, h) = (bbox[2] - bbox[0], bbox[3] - bbox[1]);
+    if !(w > 0.0 && h > 0.0 && w.is_finite() && h.is_finite() && img_w > 0.0 && img_h > 0.0) {
+        return None;
+    }
+    let scale = (w / img_w).min(h / img_h);
+    if !(scale > 0.0 && scale.is_finite()) {
+        return None;
+    }
+    let draw_w = img_w * scale;
+    let draw_h = img_h * scale;
+    let x = bbox[0] + (w - draw_w) / 2.0;
+    let y = bbox[1] + (h - draw_h) / 2.0;
+    if ![draw_w, draw_h, x, y].iter().all(|v| v.is_finite()) {
+        return None;
+    }
+
+    Some(serialize_ops(&[
+        Op::new("q", vec![]),
+        Op::new("cm", vec![num(draw_w), num(0.0), num(0.0), num(draw_h), num(x), num(y)]),
+        Op::new("Do", vec![Object::name("GreenTick")]),
+        Op::new("Q", vec![]),
+    ]))
+}
+
+fn add_watermark(doc: &mut Document, layout: &Layout, layers: &mut Dict, form: &mut Stream) -> Option<()> {
+    if layers.contains(b"watermark") {
+        return Some(());
+    }
+    let (image, img_w, img_h) = green_tick_xobject(doc)?;
+
+    let mut resources = Dict::new();
+    let mut xobjects = Dict::new();
+    xobjects.set(b"GreenTick".to_vec(), Object::Ref(image));
+    resources.set(b"XObject".to_vec(), Object::Dict(xobjects));
+
+    let mut dict = Dict::new();
+    dict.set(b"Type".to_vec(), Object::name("XObject"));
+    dict.set(b"Subtype".to_vec(), Object::name("Form"));
+    dict.set(b"BBox".to_vec(), Object::Array(layout.form_bbox.iter().map(|v| num(*v)).collect()));
+    dict.set(b"Resources".to_vec(), Object::Dict(resources));
+
+    let watermark = Stream::from_raw(dict, green_tick_ops(&layout.form_bbox, img_w, img_h)?);
+    layers.set(b"watermark".to_vec(), doc.add(watermark));
+
+    let content = form.decoded_within(MAX_LAYER_DECODED).ok()?;
+    let mut ops = pdfcraft_content::parse(&content).ops;
+
+    // Find insertion index: after n0 (background) if present, else before first foreground layer.
+    let insert_at = if let Some(bg_idx) = ops.iter().position(|op| op.is("Do") && op.name(0) == Some(b"n0")) {
+        // If n0 is enclosed in q..Q, insert after Q; otherwise insert right after /n0 Do.
+        if let Some(q_rel) = ops.get(bg_idx + 1..).and_then(|slice| slice.iter().position(|op| op.is("Q"))) {
+            bg_idx + 1 + q_rel + 1
+        } else {
+            bg_idx + 1
+        }
+    } else if let Some(first_layer) =
+        ops.iter().position(|op| op.is("Do") && op.name(0).is_some_and(|name| matches!(name, b"n1" | b"n2" | b"n3" | b"n4")))
+    {
+        // If preceded by 'q', insert before 'q'
+        if first_layer > 0 && ops.get(first_layer - 1).is_some_and(|op| op.is("q")) { first_layer - 1 } else { first_layer }
+    } else {
+        0
+    };
+
+    ops.splice(insert_at..insert_at, [Op::new("q", vec![]), Op::new("Do", vec![Object::name("watermark")]), Op::new("Q", vec![])]);
+
+    let dict = form.dict.clone();
+    let has_filter = dict.contains(b"Filter");
+    let serialized = serialize_ops(&ops);
+    *form = if has_filter { Stream::flate(dict, &serialized) } else { Stream::from_raw(dict, serialized) };
+
+    Some(())
 }
 
 /// The regenerated `n4`: its resources and content, one line enlarged to fill `bbox`, set from
@@ -918,7 +1149,16 @@ mod tests {
     }
 
     fn drawn(doc: &Document, widget: u32, name: &[u8]) -> String {
+        if name == b"FRM" {
+            return drawn_frm(doc, widget);
+        }
         String::from_utf8_lossy(&decoded(doc, layer_ref(doc, widget, b"FRM", name).unwrap())).into_owned()
+    }
+
+    fn drawn_frm(doc: &Document, widget: u32) -> String {
+        let frm_n = widget_n(doc, widget);
+        let frm_ref = xobjects_of(doc, frm_n).get(b"FRM").unwrap().as_ref().unwrap();
+        String::from_utf8_lossy(&decoded(doc, frm_ref)).into_owned()
     }
 
     #[test]
@@ -1028,9 +1268,10 @@ mod tests {
     fn a_valid_signature_draws_the_check_and_the_valid_caption() {
         let mut doc = Fixture::layered().open();
         assert!(show(&mut doc, Status::Valid).verdict_shown);
+        let frm = drawn(&doc, 4, b"FRM");
+        assert!(frm.contains("/watermark Do"), "{frm}");
         let n1 = drawn(&doc, 4, b"n1");
-        assert!(n1.contains(CIRCLE_CHECK) && n1.contains("0.1765 0.6157 0.4706 RG"), "{n1}");
-        assert!(!n1.contains("1 0.84 0.2 rg"), "the stored question mark is gone: {n1}");
+        assert_eq!(n1, "", "n1 is left blank for valid signature as the watermark is drawn");
         assert_eq!(drawn(&doc, 4, b"n3"), "");
         let shown = drawn(&doc, 4, b"n4");
         assert!(shown.contains("(Signature valid) Tj"), "{shown}");
@@ -1062,8 +1303,47 @@ mod tests {
     fn the_icon_fills_the_layer_square_flipped_into_pdf_space() {
         // n1 is 100×100 units: 24 Lucide units scale by 100/24 and y flips about the top edge.
         let mut doc = Fixture::layered().open();
-        show(&mut doc, Status::Valid);
+        show(&mut doc, Status::Unknown);
         assert!(drawn(&doc, 4, b"n1").contains("4.1667 0 0 -4.1667 0 100 cm"), "{}", drawn(&doc, 4, b"n1"));
+    }
+
+    #[test]
+    fn valid_signature_draws_large_diagonal_watermark() {
+        let mut doc = Fixture::layered().open();
+        show(&mut doc, Status::Valid);
+        // The watermark Form XObject is in the layer form's resources
+        let wm_ref = layer_ref(&doc, 4, b"FRM", b"watermark").expect("watermark layer exists");
+        let wm_obj = doc.get(wm_ref);
+        let Object::Stream(wm_stream) = &*wm_obj else { panic!("watermark is a stream") };
+        assert_eq!(wm_stream.dict.get(b"Subtype"), Some(&Object::name("Form")));
+        let ops = String::from_utf8_lossy(&wm_stream.decoded().unwrap()).to_string();
+        assert!(ops.contains("/GreenTick Do"), "{ops}");
+
+        // In the layer form FRM, /watermark is drawn after n0 and before n1
+        let frm_n = widget_n(&doc, 4);
+        let frm_ref = xobjects_of(&doc, frm_n).get(b"FRM").unwrap().as_ref().unwrap();
+        let frm_obj = doc.get(frm_ref);
+        let Object::Stream(frm_stream) = &*frm_obj else { panic!("FRM is a stream") };
+        let frm_ops = String::from_utf8_lossy(&frm_stream.decoded().unwrap()).to_string();
+        let n0_pos = frm_ops.find("/n0 Do").expect("n0 drawn");
+        let wm_pos = frm_ops.find("/watermark Do").expect("watermark drawn");
+        let n1_pos = frm_ops.find("/n1 Do").expect("n1 drawn");
+        assert!(n0_pos < wm_pos && wm_pos < n1_pos, "watermark is drawn after n0 and before n1: {frm_ops}");
+    }
+
+    #[test]
+    fn unknown_and_invalid_signatures_have_no_watermark() {
+        for status in [Status::Unknown, Status::Invalid] {
+            let mut doc = Fixture::layered().open();
+            show(&mut doc, status);
+            assert!(layer_ref(&doc, 4, b"FRM", b"watermark").is_none());
+            let frm_n = widget_n(&doc, 4);
+            let frm_ref = xobjects_of(&doc, frm_n).get(b"FRM").unwrap().as_ref().unwrap();
+            let frm_obj = doc.get(frm_ref);
+            let Object::Stream(frm_stream) = &*frm_obj else { panic!("FRM is a stream") };
+            let frm_ops = String::from_utf8_lossy(&frm_stream.decoded().unwrap()).to_string();
+            assert!(!frm_ops.contains("/watermark Do"), "{frm_ops}");
+        }
     }
 
     #[test]
@@ -1093,8 +1373,8 @@ mod tests {
     fn without_n4_the_icon_still_draws() {
         let mut doc = Fixture::named(&["n0", "n1", "n2", "n3"]).open();
         assert!(show(&mut doc, Status::Valid).verdict_shown);
-        let shown = drawn(&doc, 4, b"n1");
-        assert!(shown.contains(CIRCLE_CHECK), "{shown}");
+        let frm = drawn(&doc, 4, b"FRM");
+        assert!(frm.contains("/watermark Do"), "{frm}");
         assert_eq!(layer_ref(&doc, 4, b"FRM", b"n4"), None);
     }
 
@@ -1114,16 +1394,16 @@ mod tests {
         let Object::Stream(s) = &*doc.get(new_n) else { panic!() };
         assert_eq!(s.dict.name(b"Filter"), Some(&b"FlateDecode"[..]));
         assert_eq!(s.decoded().unwrap(), b"q 1 0 0 1 0 0 cm /FRM Do Q");
-        let shown = drawn(doc, 4, b"n1");
-        assert!(shown.contains(CIRCLE_CHECK), "{shown}");
+        let frm = drawn(doc, 4, b"FRM");
+        assert!(frm.contains("/watermark Do"), "{frm}");
     }
 
     #[test]
     fn indirect_resources_and_a_split_widget_are_followed() {
         let mut doc = Fixture::layered().with(|f| (f.indirect, f.split) = (true, true)).open();
         assert!(show(&mut doc, Status::Valid).verdict_shown);
-        let shown = drawn(&doc, 4, b"n1");
-        assert!(shown.contains(CIRCLE_CHECK), "{shown}");
+        let frm = drawn(&doc, 4, b"FRM");
+        assert!(frm.contains("/watermark Do"), "{frm}");
         // The shared resource dictionaries were copied, not edited.
         assert_eq!(doc.get(ObjRef::new(21, 0)).as_dict().unwrap().get(b"n1"), Some(&Object::Ref(ObjRef::new(13, 0))));
     }
@@ -1142,8 +1422,8 @@ mod tests {
         let mut sigs = vec![sig("Signature1", Status::Valid), sig("Signature2", Status::Unknown)];
         assert!(show_status_layers(&mut doc, &mut sigs, &StatusCaptions::default()));
         assert!(sigs.iter().all(|s| s.verdict_shown));
-        let shown = drawn(&doc, 4, b"n1");
-        assert!(shown.contains(CIRCLE_CHECK), "{shown}");
+        let frm = drawn(&doc, 4, b"FRM");
+        assert!(frm.contains("/watermark Do"), "{frm}");
         let shown = drawn(&doc, 30, b"n1");
         assert!(shown.contains(TRIANGLE_ALERT), "{shown}");
         assert_eq!(decoded(&doc, ObjRef::new(13, 0)), QUESTION.as_bytes(), "the shared n1 is unchanged");
@@ -1167,8 +1447,8 @@ mod tests {
         assert!(show_status_layers(&mut doc, &mut signatures, &StatusCaptions::default()));
         assert!(signatures[0].verdict_shown);
         assert_eq!(widget_n(&doc, 4), ObjRef::new(10, 0));
-        let shown = drawn(&doc, 32, b"n1");
-        assert!(shown.contains(CIRCLE_CHECK), "{shown}");
+        let frm = drawn(&doc, 32, b"FRM");
+        assert!(frm.contains("/watermark Do"), "{frm}");
     }
 
     #[test]
@@ -1237,8 +1517,8 @@ mod tests {
         let mut doc = fixture.open();
         let mut sigs = vec![sig("Signature1", Status::Valid), sig("Signature2", Status::Invalid)];
         show_status_layers(&mut doc, &mut sigs, &StatusCaptions::default());
-        let shown = drawn(&doc, 4, b"n1");
-        assert!(shown.contains(CIRCLE_CHECK), "{shown}");
+        let frm = drawn(&doc, 4, b"FRM");
+        assert!(frm.contains("/watermark Do"), "{frm}");
         let shown = drawn(&doc, 30, b"n3");
         assert!(shown.contains(CIRCLE_X), "{shown}");
     }
@@ -1309,7 +1589,7 @@ mod tests {
         assert_eq!(widget_n(&doc, 4), widget_n(&doc, 32));
         assert_ne!(widget_n(&doc, 4), ObjRef::new(10, 0));
         for w in [4, 32] {
-            assert!(drawn(&doc, w, b"n1").contains(CIRCLE_CHECK), "widget {w}");
+            assert!(drawn(&doc, w, b"FRM").contains("/watermark Do"), "widget {w}");
         }
     }
 
@@ -1355,8 +1635,8 @@ mod tests {
         });
         let mut doc = fixture.open();
         assert!(show(&mut doc, Status::Valid).verdict_shown);
-        let shown = drawn(&doc, 4, b"n1");
-        assert!(shown.contains(CIRCLE_CHECK), "{shown}");
+        let frm = drawn(&doc, 4, b"FRM");
+        assert!(frm.contains("/watermark Do"), "{frm}");
     }
 
     #[test]
@@ -1376,8 +1656,8 @@ mod tests {
         };
         let mut doc = two(132).open();
         assert!(show(&mut doc, Status::Valid).verdict_shown);
-        let shown = drawn(&doc, 4, b"n1");
-        assert!(shown.contains(CIRCLE_CHECK), "{shown}");
+        let frm = drawn(&doc, 4, b"FRM");
+        assert!(frm.contains("/watermark Do"), "{frm}");
         assert_eq!(widget_n(&doc, 32), ObjRef::new(36, 0), "the flat one keeps its artwork");
         let mut doc = two(132 | 2).open();
         assert!(!show(&mut doc, Status::Valid).verdict_shown);
@@ -1581,8 +1861,8 @@ mod tests {
         let mut doc = Fixture::layered().with(|f| f.layers[4].bbox = [0.0, 0.0, 200.0, 1.0]).open();
         assert!(show(&mut doc, Status::Valid).verdict_shown);
         assert_eq!(drawn(&doc, 4, b"n4"), "");
-        let shown = drawn(&doc, 4, b"n1");
-        assert!(shown.contains(CIRCLE_CHECK), "{shown}");
+        let frm = drawn(&doc, 4, b"FRM");
+        assert!(frm.contains("/watermark Do"), "{frm}");
     }
 
     #[test]
